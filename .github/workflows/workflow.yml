@@ -1,0 +1,122 @@
+name: Create Cluster 
+
+on: workflow_dispatch
+
+env:
+  AWS_REGION: us-east-1                 # set this to your preferred AWS region
+ 
+jobs:
+
+  build:
+
+    name: Create Cluster Demo
+    runs-on: ubuntu-latest
+   
+    steps:
+
+    - name: Check out code
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+        terraform_wrapper: false
+
+    - name: Terraform Format
+      id: fmt
+      run: terraform fmt -check -diff -recursive
+
+    - name: Terraform Init ECR and EKS
+      id: ecr_eks_init
+      run: terraform -chdir=terraform/eks init
+
+    - name: Terraform Validate ECR and EKS
+      id: ecr_eks_validate 
+      run: terraform -chdir=terraform/eks validate -no-color
+
+    - name: Terraform Plan ECR and EKS
+      id: ecr_eks_plan
+      run: |
+        terraform -chdir=terraform/eks plan -no-color -input=false \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -var-file="eks.tfvars"
+      continue-on-error: true
+
+    - name: Terraform Plan Status ECR and EKS
+      if: steps.ecr_eks_plan.outcome == 'failure'
+      run: exit 1
+    
+    - name: Terraform Apply ECR and EKS
+      id: ecr_eks_tfapply
+      run: |
+        terraform -chdir=terraform/eks apply -auto-approve -input=false \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -var-file="eks.tfvars"
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Login to ECR
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+        username: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        password: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    - name: Get ECR repository name
+      run: |
+        output=$(terraform -chdir=terraform/eks output --raw ecr_repository)
+        echo "ECR_NAME=$output" >> $GITHUB_ENV
+
+    - name: Build and push
+      uses: docker/build-push-action@v3
+      with:
+        context: .
+        push: true
+        tags: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAME }}:${{ github.sha }}
+
+    - name: Get EKS cluster id
+      run: |
+        output=$(terraform -chdir=terraform/eks output cluster_id)
+        echo "CLUSTER_ID=$output" >> $GITHUB_ENV
+
+    - name: Terraform Init Kubernetes Deployment
+      id: kubernetes_init
+      run: terraform -chdir=terraform/kubernetes init
+
+    - name: Terraform Validate Kubernetes Deployment
+      id: kubernetes_validate 
+      run: terraform -chdir=terraform/kubernetes validate -no-color
+
+    - name: Terraform Plan Kubernetes Deployment
+      id: kubernetes_plan
+      run: |
+        terraform -chdir=terraform/kubernetes plan -no-color -input=false \
+          -var="eks_cluster_id=${{ env.CLUSTER_ID }}" \
+          -var="image_tag=${{ github.sha }}" \
+          -var="repository_url=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAME }}" \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -var-file="kubernetes.tfvars"
+      continue-on-error: true
+
+    - name: Terraform Plan Status Kubernetes Deployment
+      if: steps.kubernetes_plan.outcome == 'failure'
+      run: exit 1
+    
+    - name: Terraform Apply Kubernetes Deployment
+      id: kubernetes_tfapply
+      run: |
+        terraform -chdir=terraform/kubernetes apply -auto-approve -input=false \
+          -var="eks_cluster_id=${{ env.CLUSTER_ID }}" \
+          -var="image_tag=${{ github.sha }}" \
+          -var="repository_url=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAME }}" \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -var-file="kubernetes.tfvars"

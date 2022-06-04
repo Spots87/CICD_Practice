@@ -1,0 +1,97 @@
+name: Destroy Cluster  
+
+on: workflow_dispatch
+
+env:
+  AWS_REGION: us-east-1                 # set this to your preferred AWS region
+  CLUSTER_ID: demo-cluster
+  ECR_NAME: demo-webapp
+jobs:
+
+  build:
+
+    name: Destroy-Cluster-Demo
+    runs-on: ubuntu-latest
+   
+    steps:
+
+    - name: Check out code
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+        terraform_wrapper: false
+
+    - name: Terraform Format
+      id: fmt
+      run: terraform fmt -check -diff -recursive
+
+    - name: Terraform Init Kubernetes Deployment
+      id: kubernetes_init
+      run: terraform -chdir=terraform/kubernetes init
+
+    - name: Terraform Validate Kubernetes Deployment
+      id: kubernetes_validate 
+      run: terraform -chdir=terraform/kubernetes validate -no-color
+
+    - name: Terraform Plan Destroy Kubernetes Deployment
+      id: kubernetes_plan_destroy
+      run: |
+        terraform -chdir=terraform/kubernetes plan -destroy -no-color -input=false \
+          -var="eks_cluster_id=${{ env.CLUSTER_ID }}" \
+          -var="image_tag=${{ github.sha }}" \
+          -var="repository_url=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAME }}" \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -var-file="kubernetes.tfvars"
+      continue-on-error: true
+
+    - name: Terraform Plan Destroy Status Kubernetes Deployment
+      if: steps.kubernetes_plan_destroy.outcome == 'failure'
+      run: exit 1
+    
+    - name: Terraform Destroy Kubernetes Deployment
+      id: kubernetes_destroy
+      run: |
+        terraform -chdir=terraform/kubernetes destroy -auto-approve -input=false \
+          -var="eks_cluster_id=${{ env.CLUSTER_ID }}" \
+          -var="image_tag=${{ github.sha }}" \
+          -var="repository_url=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_NAME }}" \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -var-file="kubernetes.tfvars"
+
+    - name: Terraform Init ECR and EKS
+      id: ecr_eks_init
+      run: terraform -chdir=terraform/eks init
+
+    - name: Terraform Validate ECR and EKS
+      id: ecr_eks_validate 
+      run: terraform -chdir=terraform/eks validate -no-color
+
+    - name: Terraform Plan Destroy ECR and EKS
+      id: ecr_eks_plan_destroy
+      run: |
+        terraform -chdir=terraform/eks plan -destroy -no-color -input=false \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -var-file="eks.tfvars"
+      continue-on-error: true
+
+    - name: Terraform Plan Destroy Status ECR and EKS
+      if: steps.ecr_eks_plan_destroy.outcome == 'failure'
+      run: exit 1
+    
+    - name: Terraform Destroy ECR and EKS
+      id: ecr_eks_tfapply
+      run: |
+        terraform -chdir=terraform/eks destroy -auto-approve -input=false \
+          -var="aws_region=${{ env.AWS_REGION }}" \
+          -var-file="eks.tfvars"
+
